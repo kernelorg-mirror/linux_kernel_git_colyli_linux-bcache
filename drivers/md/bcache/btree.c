@@ -835,13 +835,64 @@ void bch_btree_cache_free(struct cache_set *c)
 	mutex_unlock(&c->bucket_lock);
 }
 
+#define MCA_SHRINK_DEFAULT_HYSTERESIS 1000
+static int bch_mca_shrink_thread(void *arg)
+{
+
+	struct cache_set *c = arg;
+
+	while (!kthread_should_stop() &&
+	       !test_bit(CACHE_SET_IO_DISABLE, &c->flags)) {
+
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (c->btree_cache_used < c->btree_cache_threshold ||
+		    c->shrinker_disabled ||
+		    c->btree_cache_alloc_lock) {
+			/* quit main loop if kthread should stop */
+			if (kthread_should_stop() ||
+			    test_bit(CACHE_SET_IO_DISABLE, &c->flags)) {
+				set_current_state(TASK_RUNNING);
+				break;
+			}
+			schedule_timeout(30*HZ);
+			continue;
+		}
+		set_current_state(TASK_RUNNING);
+
+		/* Now shrink mca cache memory */
+		while (!kthread_should_stop() &&
+		       !test_bit(CACHE_SET_IO_DISABLE, &c->flags) &&
+		       ((c->btree_cache_used + MCA_SHRINK_DEFAULT_HYSTERESIS) >=
+			c->btree_cache_threshold)) {
+				struct shrink_control sc;
+
+				sc.gfp_mask = GFP_KERNEL;
+				sc.nr_to_scan = 100 * c->btree_pages;
+				__bch_mca_scan(&c->shrink, &sc, true);
+				cond_resched();
+		} /* shrink loop done */
+	} /* kthread loop done */
+
+	wait_for_kthread_stop();
+	return 0;
+}
+
 int bch_btree_cache_alloc(struct cache_set *c)
 {
 	unsigned int i;
 
-	for (i = 0; i < mca_reserve(c); i++)
-		if (!mca_bucket_alloc(c, &ZERO_KEY, GFP_KERNEL))
+	c->btree_cache_shrink_thread =
+		kthread_create(bch_mca_shrink_thread, c, "bcache_mca_shrink");
+	if (IS_ERR_OR_NULL(c->btree_cache_shrink_thread))
+		return -ENOMEM;
+	c->btree_cache_threshold = BTREE_CACHE_THRESHOLD_DEFAULT;
+
+	for (i = 0; i < mca_reserve(c); i++) {
+		if (!mca_bucket_alloc(c, &ZERO_KEY, GFP_KERNEL)) {
+			kthread_stop(c->btree_cache_shrink_thread);
 			return -ENOMEM;
+		}
+	}
 
 	list_splice_init(&c->btree_cache,
 			 &c->btree_cache_freeable);
@@ -960,6 +1011,14 @@ static struct btree *mca_alloc(struct cache_set *c, struct btree_op *op,
 
 	if (mca_find(c, k))
 		return NULL;
+
+	/*
+	 * If too many btree node cache allocated, wake up
+	 * the cache shrink thread to release btree node
+	 * cache memory.
+	 */
+	if (c->btree_cache_used >= c->btree_cache_threshold)
+		wake_up_process(c->btree_cache_shrink_thread);
 
 	/* btree_free() doesn't free memory; it sticks the node on the end of
 	 * the list. Check if there's any freed nodes there:

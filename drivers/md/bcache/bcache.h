@@ -586,6 +586,9 @@ struct cache_set {
 	struct task_struct	*btree_cache_alloc_lock;
 	spinlock_t		btree_cannibalize_lock;
 
+	unsigned int		btree_cache_threshold;
+	struct task_struct	*btree_cache_shrink_thread;
+
 	/*
 	 * When we free a btree node, we increment the gen of the bucket the
 	 * node is in - but we can't rewrite the prios and gens until we

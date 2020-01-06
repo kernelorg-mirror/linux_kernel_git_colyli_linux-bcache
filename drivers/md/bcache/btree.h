@@ -102,6 +102,9 @@
 #include "bset.h"
 #include "debug.h"
 
+/* For 2MB bucket, 15000 is around 30GB memory */
+#define BTREE_CACHE_THRESHOLD_DEFAULT 15000
+
 struct btree_write {
 	atomic_t		*journal;
 
