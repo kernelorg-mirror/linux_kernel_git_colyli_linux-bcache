@@ -1107,8 +1107,10 @@ retry:
 		b = mca_alloc(c, op, k, level);
 		mutex_unlock(&c->bucket_lock);
 
-		if (!b)
+		if (!b) {
+			cond_resched();
 			goto retry;
+		}
 		if (IS_ERR(b))
 			return b;
 
