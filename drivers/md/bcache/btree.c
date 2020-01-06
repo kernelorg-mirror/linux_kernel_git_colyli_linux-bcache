@@ -699,8 +699,9 @@ out_unlock:
 	return -ENOMEM;
 }
 
-static unsigned long bch_mca_scan(struct shrinker *shrink,
-				  struct shrink_control *sc)
+static unsigned long __bch_mca_scan(struct shrinker *shrink,
+				    struct shrink_control *sc,
+				    bool reap_flush)
 {
 	struct cache_set *c = container_of(shrink, struct cache_set, shrink);
 	struct btree *b, *t;
@@ -738,7 +739,7 @@ static unsigned long bch_mca_scan(struct shrinker *shrink,
 		if (nr <= 0)
 			goto out;
 
-		if (!mca_reap(b, 0, false)) {
+		if (!mca_reap(b, 0, reap_flush)) {
 			mca_data_free(b);
 			rw_unlock(true, b);
 			freed++;
@@ -751,7 +752,7 @@ static unsigned long bch_mca_scan(struct shrinker *shrink,
 		if (nr <= 0 || i >= btree_cache_used)
 			goto out;
 
-		if (!mca_reap(b, 0, false)) {
+		if (!mca_reap(b, 0, reap_flush)) {
 			mca_bucket_free(b);
 			mca_data_free(b);
 			rw_unlock(true, b);
@@ -764,6 +765,12 @@ static unsigned long bch_mca_scan(struct shrinker *shrink,
 out:
 	mutex_unlock(&c->bucket_lock);
 	return freed * c->btree_pages;
+}
+
+static unsigned long bch_mca_scan(struct shrinker *shrink,
+				  struct shrink_control *sc)
+{
+	return __bch_mca_scan(shrink, sc, false);
 }
 
 static unsigned long bch_mca_count(struct shrinker *shrink,
