@@ -23,6 +23,7 @@
 #include <linux/random.h>
 #include <linux/reboot.h>
 #include <linux/sysfs.h>
+#include <linux/sched/signal.h>
 
 unsigned int bch_cutoff_writeback;
 unsigned int bch_cutoff_writeback_sync;
@@ -1919,6 +1920,20 @@ static int run_cache_set(struct cache_set *c)
 		err = "error in recovery";
 		if (bch_btree_check(c))
 			goto err;
+
+		/*
+		 * If bch_btree_check() consumes too much system memory,
+		 * although c->btree_cache_shrink_thread may shrink and
+		 * restrict the above memory consuption, the memory shrinking
+		 * is in parallel. Due to the delay of parallel shrinking, It
+		 * is still possible that the registering process (which is
+		 * current process) is selected by OOM killer for its peak
+		 * memory consumption. Then following kernel thread creating
+		 * will fail because of the pending signal sent by OOM killer.
+		 * In this location, such signal can be safely ignored, to make
+		 * following kthread creation function working.
+		 */
+		flush_signals(current);
 
 		bch_journal_mark(c, &journal);
 		bch_initial_gc_finish(c);
