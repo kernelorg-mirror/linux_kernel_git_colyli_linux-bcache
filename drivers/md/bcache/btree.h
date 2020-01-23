@@ -228,17 +228,20 @@ static inline void bch_btree_op_init(struct btree_op *op, int write_lock_level)
 
 static inline void rw_lock(bool w, struct btree *b, int level)
 {
-	w ? down_write_nested(&b->lock, level + 1)
-	  : down_read_nested(&b->lock, level + 1);
-	if (w)
+	if (w) {
+		down_write_nested(&b->lock, level + 1);
 		b->seq++;
+	} else
+		down_read_nested(&b->lock, level + 1);
 }
 
 static inline void rw_unlock(bool w, struct btree *b)
 {
-	if (w)
+	if (w) {
 		b->seq++;
-	(w ? up_write : up_read)(&b->lock);
+		up_write(&b->lock);
+	} else
+		up_read(&b->lock);
 }
 
 void bch_btree_node_read_done(struct btree *b);

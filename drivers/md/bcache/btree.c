@@ -99,7 +99,7 @@
 #define PTR_HASH(c, k)							\
 	(((k)->ptr[0] >> c->bucket_bits) | PTR_GEN(k, 0))
 
-#define insert_lock(s, b)	((b)->level <= (s)->lock)
+#define insert_lock(s, b)	((s)->level >= (b)->lock)
 
 /*
  * These macros are for recursing down the btree - they handle the details of

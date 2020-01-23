@@ -545,7 +545,6 @@ static struct bkey *tree_to_bkey(struct bset_tree *t, unsigned int j)
 {
 	return cacheline_to_bkey(t, to_inorder(j, t), t->tree[j].m);
 }
-
 static struct bkey *tree_to_prev_bkey(struct bset_tree *t, unsigned int j)
 {
 	return (void *) (((uint64_t *) tree_to_bkey(t, j)) - t->prev[j]);
@@ -584,9 +583,12 @@ static inline uint64_t shrd128(uint64_t high, uint64_t low, uint8_t shift)
 static inline unsigned int bfloat_mantissa(const struct bkey *k,
 				       struct bkey_float *f)
 {
-	const uint64_t *p = &k->low - (f->exponent >> 6);
-
-	return shrd128(p[-1], p[0], f->exponent & 63) & BKEY_MANTISSA_MASK;
+	if (!(f->exponent >> 6))
+		return shrd128(0, KEY_INODE(k), f->exponent & 63) &
+		       BKEY_MANTISSA_MASK;
+	else 
+		return shrd128(KEY_INODE(k), k->low, f->exponent & 63) &
+		       BKEY_MANTISSA_MASK;
 }
 
 static void make_bfloat(struct bset_tree *t, unsigned int j)
@@ -621,7 +623,10 @@ static void make_bfloat(struct bset_tree *t, unsigned int j)
 	else
 		f->exponent = fls64(r->low ^ l->low);
 
-	f->exponent = max_t(int, f->exponent - BKEY_MANTISSA_BITS, 0);
+	if (f->exponent > BKEY_MANTISSA_BITS)
+		f->exponent -= BKEY_MANTISSA_BITS;
+	else
+		f->exponent = 0;
 
 	/*
 	 * Setting f->exponent = 127 flags this node as failed, and causes the
