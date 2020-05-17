@@ -359,6 +359,11 @@ STORE(__cached_dev)
 		if (v < 0)
 			return v;
 
+		if ((unsigned int) v == CACHE_MODE_WRITEBACK) {
+			pr_err("writeback mode is not supported for zoned backing device.\n");
+			return -ENOTSUPP;
+		}
+
 		if ((unsigned int) v != BDEV_CACHE_MODE(&dc->sb)) {
 			SET_BDEV_CACHE_MODE(&dc->sb, v);
 			bch_write_bdev_super(dc, NULL);
