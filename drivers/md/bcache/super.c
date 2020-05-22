@@ -679,10 +679,32 @@ static int ioctl_dev(struct block_device *b, fmode_t mode,
 	return d->ioctl(d, mode, cmd, arg);
 }
 
+static int report_zones_dev(struct gendisk *disk,
+			    sector_t sector,
+			    unsigned int nr_zones,
+			    report_zones_cb cb,
+			    void *data)
+{
+	struct bcache_device *d = disk->private_data;
+	struct bch_report_zones_args args = {
+		.bcache_device = d,
+		.sector = sector,
+		.orig_data = data,
+		.orig_cb = cb,
+	};
+
+	/* flash dev does not have report_zones method */
+	if (WARN_ON_ONCE(!blk_queue_is_zoned(disk->queue)))
+		return -EOPNOTSUPP;
+
+	return d->report_zones(&args, nr_zones);
+}
+
 static const struct block_device_operations bcache_ops = {
 	.open		= open_dev,
 	.release	= release_dev,
 	.ioctl		= ioctl_dev,
+	.report_zones	= report_zones_dev,
 	.owner		= THIS_MODULE,
 };
 
@@ -820,6 +842,7 @@ static void bcache_device_free(struct bcache_device *d)
 
 static int bcache_device_init(struct bcache_device *d, unsigned int block_size,
 			      sector_t sectors, make_request_fn make_request_fn)
+
 {
 	struct request_queue *q;
 	const size_t max_stripes = min_t(size_t, INT_MAX,
@@ -1308,6 +1331,70 @@ static void cached_dev_flush(struct closure *cl)
 	continue_at(cl, cached_dev_free, system_wq);
 }
 
+static inline int cached_dev_data_offset_check(struct cached_dev *dc)
+{
+	if (!bdev_is_zoned(dc->bdev))
+		return 0;
+
+	/*
+	 * If the backing hard drive is zoned device, sb.data_offset
+	 * should be aligned to zone size, which is automatically
+	 * handled by 'bcache' util of bcache-tools. If the data_offset
+	 * is not aligned to zone size, it means the bcache-tools is
+	 * outdated.
+	 */
+	if (dc->sb.data_offset & (bdev_zone_sectors(dc->bdev) - 1)) {
+		pr_err("data_offset %llu is not aligned to zone size %llu, please update bcache-tools and re-make the zoned backing device.\n",
+			dc->sb.data_offset, bdev_zone_sectors(dc->bdev));
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+/*
+ * Initialize zone information for the bcache device, this function
+ * assumes the bcache device has a cached device (dc != NULL), and
+ * the cached device is zoned device (bdev_is_zoned(dc->bdev) == true).
+ *
+ * The following zone information of the bcache device will be set,
+ * - zoned model, same as the model of zoned backing device
+ * - zone size in sectors, same as the zoned backing device
+ * - zones number, it is zones number of zoned backing device minus the
+ *   reserved zones for bcache super blocks.
+ */
+static int bch_cached_dev_zone_init(struct cached_dev *dc)
+{
+	struct request_queue *d_q, *b_q;
+	enum blk_zoned_model model;
+
+	if (!bdev_is_zoned(dc->bdev))
+		return 0;
+
+	/* queue of bcache device */
+	d_q = dc->disk.disk->queue;
+	/* queue of backing device */
+	b_q = bdev_get_queue(dc->bdev);
+
+	model = blk_queue_zoned_model(b_q);
+	if (model != BLK_ZONED_NONE) {
+		uint64_t reserved_zone_nr;
+
+		d_q->limits.zoned = model;
+		blk_queue_chunk_sectors(d_q, b_q->limits.chunk_sectors);
+		/*
+		 * (dc->sb.data_offset / q->limits.chunk_sectors) is the
+		 * zones number reserved for bcache super block. By default
+		 * it is set to 1 by bcache-tools.
+		 */
+		reserved_zone_nr = dc->sb.data_offset;
+		do_div(reserved_zone_nr, d_q->limits.chunk_sectors);
+		d_q->nr_zones = b_q->nr_zones - reserved_zone_nr;
+	}
+
+	return 0;
+}
+
 static int cached_dev_init(struct cached_dev *dc, unsigned int block_size)
 {
 	int ret;
@@ -1334,6 +1421,10 @@ static int cached_dev_init(struct cached_dev *dc, unsigned int block_size)
 
 	dc->disk.stripe_size = q->limits.io_opt >> 9;
 
+	ret = cached_dev_data_offset_check(dc);
+	if (ret)
+		return ret;
+
 	if (dc->disk.stripe_size)
 		dc->partial_stripes_expensive =
 			q->limits.raid_partial_stripes_expensive;
@@ -1356,7 +1447,9 @@ static int cached_dev_init(struct cached_dev *dc, unsigned int block_size)
 
 	bch_cached_dev_request_init(dc);
 	bch_cached_dev_writeback_init(dc);
-	return 0;
+	ret = bch_cached_dev_zone_init(dc);
+
+	return ret;
 }
 
 /* Cached device - bcache superblock */

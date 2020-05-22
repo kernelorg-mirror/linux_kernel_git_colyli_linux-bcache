@@ -1225,6 +1225,30 @@ static int cached_dev_ioctl(struct bcache_device *d, fmode_t mode,
 	if (dc->io_disable)
 		return -EIO;
 
+	/*
+	 * All zoned device ioctl commands are handled in
+	 * other code paths,
+	 * - BLKREPORTZONE: by report_zones method of bcache_ops.
+	 * - BLKRESETZONE/BLKOPENZONE/BLKCLOSEZONE/BLKFINISHZONE: all handled
+	 *   by bio code path.
+	 * - BLKGETZONESZ/BLKGETNRZONES:directly handled inside generic block
+	 *   ioctl handler blkdev_common_ioctl().
+	 */
+	switch (cmd) {
+	case BLKREPORTZONE:
+	case BLKRESETZONE:
+	case BLKGETZONESZ:
+	case BLKGETNRZONES:
+	case BLKOPENZONE:
+	case BLKCLOSEZONE:
+	case BLKFINISHZONE:
+		pr_warn("Zoned device ioctl cmd should not be here.\n");
+		return -EOPNOTSUPP;
+	default:
+		/* Other commands  */
+		break;
+	}
+
 	return __blkdev_driver_ioctl(dc->bdev, mode, cmd, arg);
 }
 
@@ -1253,6 +1277,70 @@ static int cached_dev_congested(void *data, int bits)
 	return ret;
 }
 
+/*
+ * The callback routine to parse a specific zone from all reporting
+ * zones. args->orig_cb() is the upper layer report zones callback,
+ * which should be called after the LBA conversion.
+ * Notice: all zones after zone 0 will be reported, including the
+ * offlined zones, how to handle the different types of zones are
+ * fully decided by upper layer who calss for reporting zones of
+ * the bcache device.
+ */
+static int cached_dev_report_zones_cb(struct blk_zone *zone,
+				      unsigned int idx, void *data)
+{
+	struct bch_report_zones_args *args = data;
+	struct bcache_device *d = args->bcache_device;
+	struct cached_dev *dc = container_of(d, struct cached_dev, disk);
+	unsigned long data_offset = dc->sb.data_offset;
+
+	/* Reserved zone(s) should not be reported */
+	if(WARN_ON_ONCE(zone->start < data_offset))
+		return -EIO;
+
+	/* convert back to LBA of the bcache device*/
+	zone->start -= data_offset;
+
+	switch (zone->cond) {
+	case BLK_ZONE_COND_NOT_WP:
+	case BLK_ZONE_COND_READONLY:
+	case BLK_ZONE_COND_OFFLINE:
+		/* No write pointer available */
+		break;
+	case BLK_ZONE_COND_EMPTY:
+		zone->wp = zone->start;
+		break;
+	case BLK_ZONE_COND_FULL:
+		/*
+		 * In such condition writer pointer returned from
+		 * hard drive might (probably) be 0xfffff...ffff,
+		 * set it to end of the reporting zone to be nice
+		 * to upper layer code.
+		 */
+		zone->wp = zone->start + zone->len;
+		break;
+	default:
+		/* convert back to LBA of the bcache device*/
+		zone->wp -= data_offset;
+		break;
+	}
+
+	return args->orig_cb(zone, idx, args->orig_data);
+}
+
+static int cached_dev_report_zones(struct bch_report_zones_args *args,
+				   unsigned int nr_zones)
+{
+	struct bcache_device *d = args->bcache_device;
+	struct cached_dev *dc = container_of(d, struct cached_dev, disk);
+	/* skip zone 0 which is fully occupied by bcache super block */
+	sector_t sector = args->sector + dc->sb.data_offset;
+
+	/* sector is real LBA of backing device */
+	return blkdev_report_zones(dc->bdev, sector, nr_zones,
+				   cached_dev_report_zones_cb, args);
+}
+
 void bch_cached_dev_request_init(struct cached_dev *dc)
 {
 	struct gendisk *g = dc->disk.disk;
@@ -1260,6 +1348,9 @@ void bch_cached_dev_request_init(struct cached_dev *dc)
 	g->queue->backing_dev_info->congested_fn = cached_dev_congested;
 	dc->disk.cache_miss			= cached_dev_cache_miss;
 	dc->disk.ioctl				= cached_dev_ioctl;
+
+	if (bdev_is_zoned(dc->bdev))
+		dc->disk.report_zones		= cached_dev_report_zones;
 }
 
 /* Flash backed devices */

@@ -221,6 +221,7 @@ BITMASK(GC_MOVE, struct bucket, gc_mark, 15, 1);
 struct search;
 struct btree;
 struct keybuf;
+struct bch_report_zones_args;
 
 struct keybuf_key {
 	struct rb_node		node;
@@ -277,6 +278,8 @@ struct bcache_device {
 			  struct bio *bio, unsigned int sectors);
 	int (*ioctl)(struct bcache_device *d, fmode_t mode,
 		     unsigned int cmd, unsigned long arg);
+	int (*report_zones)(struct bch_report_zones_args *args,
+			    unsigned int nr_zones);
 };
 
 struct io {
@@ -746,6 +749,13 @@ struct bbio {
 		 */
 	};
 	struct bio		bio;
+};
+
+struct bch_report_zones_args {
+	struct bcache_device *bcache_device;
+	sector_t sector;
+	void *orig_data;
+	report_zones_cb orig_cb;
 };
 
 #define BTREE_PRIO		USHRT_MAX
