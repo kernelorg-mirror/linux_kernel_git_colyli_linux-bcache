@@ -1050,6 +1050,61 @@ insert_data:
 	continue_at(cl, cached_dev_write_complete, NULL);
 }
 
+/*
+ * Invalidate the LBA range on cache device which is covered by the
+ * the resetting zone.
+ */
+static int bch_data_invalidate_zone(struct closure *cl, size_t zone_sector)
+{
+	struct search *s = container_of(cl, struct search, cl);
+	struct data_insert_op *iop = &s->iop;
+	int max_keys, free_keys, ret;
+	size_t start = zone_sector, size;
+
+	max_keys = (block_bytes(iop->c) - sizeof(struct jset)) /
+		   sizeof(uint64_t);
+	bch_keylist_init(&iop->insert_keys);
+	ret = bch_keylist_realloc(&iop->insert_keys, max_keys, iop->c);
+	if (ret < 0)
+		return -ENOMEM;
+
+	size = s->d->disk->queue->limits.chunk_sectors;
+	while (size > 0) {
+		atomic_t *journal_ref;
+
+		bch_keylist_reset(&iop->insert_keys);
+		free_keys = max_keys;
+
+		while (size > 0 && free_keys >= 2) {
+			size_t sectors = min_t(size_t,
+					size, 1U << (KEY_SIZE_BITS - 1));
+
+			bch_keylist_add(&iop->insert_keys,
+					&KEY(iop->inode, start, sectors));
+			start += sectors;
+			size -= sectors;
+			free_keys -= 2;
+		}
+
+		/* Insert invalidate keys into btree */
+		journal_ref = bch_journal(iop->c, &iop->insert_keys, NULL);
+		if (!journal_ref) {
+			ret = -EIO;
+			break;
+		}
+
+		ret = bch_btree_insert(iop->c,
+				&iop->insert_keys, journal_ref, NULL);
+		atomic_dec_bug(journal_ref);
+		if (ret < 0)
+			break;
+	}
+
+	bch_keylist_free(&iop->insert_keys);
+
+	return ret;
+}
+
 static void cached_dev_nodata(struct closure *cl)
 {
 	struct search *s = container_of(cl, struct search, cl);
@@ -1058,10 +1113,33 @@ static void cached_dev_nodata(struct closure *cl)
 	if (s->iop.flush_journal)
 		bch_journal_meta(s->iop.c, cl);
 
-	/* If it's a flush, we send the flush to the backing device too */
+	if (bio_op(bio) == REQ_OP_ZONE_RESET) {
+		int err = 0;
+
+		err = bch_data_invalidate_zone(cl, bio->bi_iter.bi_sector);
+		if (err < 0) {
+			s->iop.status = errno_to_blk_status(err);
+			/* set by bio_cnt_set() in do_bio_hook() */
+			bio_put(bio);
+			/*
+			 * Invalidate cached data fails, don't send
+			 * the zone reset bio to backing device and
+			 * return failure. Otherwise potential data
+			 * corruption on bcache device may happen.
+			 */
+			goto continue_bio_complete;
+		}
+
+	}
+
+	/*
+	 * For flush or zone management bios, of cause
+	 * they should be sent to backing device too.
+	 */
 	bio->bi_end_io = backing_request_endio;
 	closure_bio_submit(s->iop.c, bio, cl);
 
+continue_bio_complete:
 	continue_at(cl, cached_dev_bio_complete, NULL);
 }
 
