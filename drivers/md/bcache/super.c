@@ -1382,6 +1382,8 @@ static int bch_cached_dev_zone_init(struct cached_dev *dc)
 
 		d_q->limits.zoned = model;
 		blk_queue_chunk_sectors(d_q, b_q->limits.chunk_sectors);
+		blk_queue_max_zone_append_sectors(d_q,
+				b_q->limits.max_zone_append_sectors);
 		/*
 		 * (dc->sb.data_offset / q->limits.chunk_sectors) is the
 		 * zones number reserved for bcache super block. By default
