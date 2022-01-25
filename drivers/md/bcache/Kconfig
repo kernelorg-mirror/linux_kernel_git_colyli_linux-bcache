@@ -36,3 +36,13 @@ config BCACHE_ASYNC_REGISTRATION
 	device path into this file will returns immediately and the real
 	registration work is handled in kernel work queue in asynchronous
 	way.
+
+config BCACHE_DAX
+	bool "Direct access underlying block device (EXPERIMENTAL)"
+	depends on BCACHE
+	depends on 64BIT
+	depends on DAX
+	depends on LIBNVDIMM
+	help
+	Directly access the underlying block device with dax interface when
+	DAX is supported.

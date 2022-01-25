@@ -182,6 +182,7 @@
 #include <linux/kobject.h>
 #include <linux/list.h>
 #include <linux/mutex.h>
+#include <linux/dax.h>
 #include <linux/rbtree.h>
 #include <linux/rwsem.h>
 #include <linux/refcount.h>
@@ -459,6 +460,13 @@ struct cache {
 	bool			discard; /* Get rid of? */
 
 	struct journal_device	journal;
+
+#ifdef CONFIG_BCACHE_DAX
+	bool			dax_supported;
+	struct dax_device	*dax_dev;
+	void			*dax_map_base;
+	pfn_t			dax_map_pfn;
+#endif /* CONFIG_BCACHE_DAX */
 
 	/* The rest of this all shows up in sysfs */
 #define IO_ERROR_SHIFT		20
@@ -949,6 +957,10 @@ static inline void wait_for_kthread_stop(void)
 		schedule();
 	}
 }
+
+#ifndef CONFIG_BCACHE_DAX
+static inline enable_dax_support(struct cache *ca) { }
+#endif /* CONFIG_BCACHE_DAX */
 
 /* Forward declarations */
 

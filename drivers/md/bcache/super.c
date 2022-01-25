@@ -2147,6 +2147,52 @@ err:
 	return -EIO;
 }
 
+#ifdef CONFIG_BCACHE_DAX
+static int enable_dax_support(struct cache *ca)
+{
+	int id;
+	pgoff_t pgoff;
+	long nr_pages, dax_ret;
+	int ret = -ENOTSUPP;
+
+	ca->dax_dev = fs_dax_get_by_bdev(ca->bdev);
+	if (!ca->dax_dev)
+		goto out;
+
+	if (!dax_supported(ca->dax_dev, ca->bdev, PAGE_SIZE,
+			   0, ca->sb.nbuckets * bucket_bytes(ca)))
+		goto out;
+
+	if (bdev_dax_pgoff(ca->bdev, 0, PAGE_SIZE, &pgoff))
+		goto out;
+
+	nr_pages = ca->sb.nbuckets * bucket_bytes(ca) >> PAGE_SHIFT;
+
+	id = dax_read_lock();
+	dax_ret = dax_direct_access(ca->dax_dev,
+			pgoff, nr_pages,
+			&ca->dax_map_base, &ca->dax_map_pfn);
+	dax_read_unlock(id);
+
+	if (dax_ret <= 0)
+		goto put_dax;
+	if (dax_ret < nr_pages) {
+		pr_debug("Not support multiple ranges dax access yet.\n");
+		goto put_dax;
+	}
+
+	ret = 0;
+	goto out;
+
+put_dax:
+	fs_put_dax(ca->dax_dev);
+	ca->dax_dev = NULL;
+	ca->dax_map_base = NULL;
+out:
+	return ret;
+}
+#endif /* CONFIG_BCACHE_DAX */
+
 static const char *register_cache_set(struct cache *ca)
 {
 	char buf[12];
@@ -2185,6 +2231,9 @@ found:
 	kobject_get(&ca->kobj);
 	ca->set = c;
 	ca->set->cache = ca;
+
+	/* A good-to-have try, ignore return value */
+	enable_dax_support(ca);
 
 	err = "failed to run cache set";
 	if (run_cache_set(c) < 0)
